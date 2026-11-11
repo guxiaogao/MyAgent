@@ -1,0 +1,205 @@
+import os
+from typing import Dict, List, Optional
+
+from pydantic import Field
+
+from app.agent.toolcall import ToolCallAgent
+from app.config import config
+from app.logger import logger
+from app.prompt.manus import NEXT_STEP_PROMPT, SYSTEM_PROMPT
+from app.schema import Message
+from app.tool import Terminate, ToolCollection
+from app.tool.ask_human import AskHuman
+from app.tool.mcp import MCPClients, MCPClientTool
+from app.tool.python_execute import PythonExecute
+from app.tool.str_replace_editor import StrReplaceEditor
+
+
+_BROWSER_USE_SERVER_ID = "browser_use"
+_BROWSER_USE_COMMAND = "uvx"
+_BROWSER_USE_ARGS = ["browser-use", "--cli-mcp"]
+_BROWSER_USE_ENV_VARS = (
+    "BROWSER_USE_API_KEY",
+    "BROWSER_USE_CLOUD_API_URL",
+    "BU_BROWSER_ID",
+    "BU_CDP_URL",
+    "BU_CDP_WS",
+    "BU_NAME",
+)
+_BROWSER_USE_TRANSPORT_INSTRUCTIONS = """\
+Browser Use CLI 3.0 is exposed here as MCP tools. When the Browser Use skill
+shows `browser-use <<'PY'`, pass the Python body to `browser_exec` instead.
+Use `browser_screenshot` when visual inspection is needed. Both tools use the
+same persistent browser-harness session as CLI 3.0.
+"""
+
+
+def _browser_use_env() -> Dict[str, str]:
+    return {name: value for name in _BROWSER_USE_ENV_VARS if (value := os.getenv(name))}
+
+
+class Manus(ToolCallAgent):
+    """支持本地工具与 MCP 工具的通用智能体。"""
+
+    name: str = "Manus"
+    description: str = "A versatile agent that can solve various tasks using multiple tools including MCP-based tools"
+
+    system_prompt: str = SYSTEM_PROMPT.format(directory=config.workspace_root)
+    next_step_prompt: str = NEXT_STEP_PROMPT
+
+    max_observe: int = 10000
+    max_steps: int = 20
+
+    # 用于访问远程工具的 MCP 客户端
+    mcp_clients: MCPClients = Field(default_factory=MCPClients)
+
+    # 向工具集合中添加通用工具
+    available_tools: ToolCollection = Field(
+        default_factory=lambda: ToolCollection(
+            PythonExecute(),
+            StrReplaceEditor(),
+            AskHuman(),
+            Terminate(),
+        )
+    )
+
+    special_tool_names: list[str] = Field(default_factory=lambda: [Terminate().name])
+
+    # 记录已连接的 MCP 服务器
+    connected_servers: Dict[str, str] = Field(
+        default_factory=dict
+    )  # server_id -> url/command 的映射
+    mcp_instruction_servers: set[str] = Field(default_factory=set, exclude=True)
+    _initialized: bool = False
+
+    @classmethod
+    async def create(cls, **kwargs) -> "Manus":
+        """工厂方法：创建并正确初始化一个 Manus 实例。"""
+        instance = cls(**kwargs)
+        await instance.initialize_mcp_servers()
+        instance._initialized = True
+        return instance
+
+    async def initialize_mcp_servers(self) -> None:
+        """初始化与已配置 MCP 服务器的连接。"""
+        # 若配置未声明 browser_use 服务器且未被环境变量禁用，则自动接入 Browser Use CLI 3.0
+        if _BROWSER_USE_SERVER_ID not in config.mcp_config.servers and os.getenv(
+            "OPENMANUS_DISABLE_BROWSER_USE", ""
+        ).lower() not in {"1", "true", "yes"}:
+            try:
+                await self.connect_mcp_server(
+                    _BROWSER_USE_COMMAND,
+                    _BROWSER_USE_SERVER_ID,
+                    use_stdio=True,
+                    stdio_args=_BROWSER_USE_ARGS,
+                    tool_name_prefix=False,
+                    stdio_env=_browser_use_env(),
+                )
+                logger.info("已通过 MCP 连接到 Browser Use CLI 3.0")
+            except Exception as e:
+                logger.error(f"连接 Browser Use CLI 3.0 失败：{e}")
+
+        for server_id, server_config in config.mcp_config.servers.items():
+            try:
+                if server_config.type == "sse":
+                    if server_config.url:
+                        await self.connect_mcp_server(server_config.url, server_id)
+                        logger.info(
+                            f"已连接到 MCP 服务器 {server_id}（地址：{server_config.url}）"
+                        )
+                elif server_config.type == "stdio":
+                    if server_config.command:
+                        await self.connect_mcp_server(
+                            server_config.command,
+                            server_id,
+                            use_stdio=True,
+                            stdio_args=server_config.args,
+                            tool_name_prefix=server_id != _BROWSER_USE_SERVER_ID,
+                            stdio_env=(
+                                _browser_use_env()
+                                if server_id == _BROWSER_USE_SERVER_ID
+                                else None
+                            ),
+                        )
+                        logger.info(
+                            f"已通过命令 {server_config.command} 连接到 MCP 服务器 {server_id}"
+                        )
+            except Exception as e:
+                logger.error(f"连接 MCP 服务器 {server_id} 失败：{e}")
+
+    async def connect_mcp_server(
+        self,
+        server_url: str,
+        server_id: str = "",
+        use_stdio: bool = False,
+        stdio_args: Optional[List[str]] = None,
+        tool_name_prefix: bool = True,
+        stdio_env: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """连接到 MCP 服务器并注册其提供的工具。"""
+        if use_stdio:
+            await self.mcp_clients.connect_stdio(
+                server_url,
+                stdio_args or [],
+                server_id,
+                tool_name_prefix=tool_name_prefix,
+                env=stdio_env,
+            )
+            self.connected_servers[server_id or server_url] = server_url
+        else:
+            await self.mcp_clients.connect_sse(server_url, server_id)
+            self.connected_servers[server_id or server_url] = server_url
+
+        # 仅将当前服务器新提供的工具加入可用工具集合
+        new_tools = [
+            tool for tool in self.mcp_clients.tools if tool.server_id == server_id
+        ]
+        self.available_tools.add_tools(*new_tools)
+
+        # 将服务器附带的使用说明写入系统消息（每个服务器只写入一次）
+        resolved_server_id = server_id or server_url
+        instructions = self.mcp_clients.server_instructions.get(resolved_server_id)
+        if instructions and resolved_server_id not in self.mcp_instruction_servers:
+            transport_instructions = (
+                f"{_BROWSER_USE_TRANSPORT_INSTRUCTIONS}\n"
+                if resolved_server_id == _BROWSER_USE_SERVER_ID
+                else ""
+            )
+            self.memory.add_message(
+                Message.system_message(
+                    f"{transport_instructions}MCP server instructions:\n{instructions}"
+                )
+            )
+            self.mcp_instruction_servers.add(resolved_server_id)
+
+    async def disconnect_mcp_server(self, server_id: str = "") -> None:
+        """断开 MCP 服务器连接并移除其工具。"""
+        await self.mcp_clients.disconnect(server_id)
+        if server_id:
+            self.connected_servers.pop(server_id, None)
+        else:
+            self.connected_servers.clear()
+
+        # 重建工具集合：剔除已断开服务器的工具，保留本地工具与其余 MCP 工具
+        base_tools = [
+            tool
+            for tool in self.available_tools.tools
+            if not isinstance(tool, MCPClientTool)
+        ]
+        self.available_tools = ToolCollection(*base_tools)
+        self.available_tools.add_tools(*self.mcp_clients.tools)
+
+    async def cleanup(self):
+        """清理 Manus 智能体的资源。"""
+        # 仅在已完成初始化时才断开所有 MCP 服务器连接
+        if self._initialized:
+            await self.disconnect_mcp_server()
+            self._initialized = False
+
+    async def think(self) -> bool:
+        """结合当前上下文处理状态并决策下一步动作。"""
+        if not self._initialized:
+            await self.initialize_mcp_servers()
+            self._initialized = True
+
+        return await super().think()
