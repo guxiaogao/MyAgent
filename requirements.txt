@@ -1,13 +1,13 @@
-pydantic~=2.10.6
-openai~=1.66.3
+pydantic~=2.14.4
+openai~=3.58.0
 tenacity~=9.0.0
 pyyaml~=6.0.2
 loguru~=0.7.3
 structlog>=24.1.0,<26.0.0
 numpy
 datasets~=3.4.1
-fastapi~=0.115.11
-tiktoken~=0.9.0
+fastapi~=0.165.0
+tiktoken~=0.14.0
 
 html2text~=2024.2.26
 gymnasium~=1.1.1
@@ -21,7 +21,7 @@ baidusearch~=1.0.3
 duckduckgo_search~=7.5.3
 
 aiofiles~=24.1.0
-pydantic_core~=2.27.2
+pydantic_core~=2.50.5
 colorama~=0.4.6
 playwright~=1.51.0
 
@@ -47,5 +47,5 @@ setuptools~=75.8.0
 torch~=2.12.0
 # transformers>=4.51 要求 huggingface-hub>=0.30，与上面的 huggingface-hub~=0.29.2 冲突
 transformers~=4.49.0
-# litellm>=1.67 要求 openai>=1.68.2，与上面的 openai~=1.66.3 冲突（crawl4ai 的传递依赖，显式声明以约束解析）
+# litellm>=1.67 要求 openai>=1.68.2，与上面的 openai~=3.58.0 冲突（crawl4ai 的传递依赖，显式声明以约束解析）
 litellm~=1.65.0
