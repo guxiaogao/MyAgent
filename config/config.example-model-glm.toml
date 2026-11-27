@@ -1,0 +1,15 @@
+# 本文件为智谱 GLM 模型的示例配置模板：复制为 config.toml 后填入自己的 API key 即可使用
+# Global LLM configuration
+[llm] #ZHIPU GLM:
+model = "GLM-4.7-Flash"                            # The LLM model to use
+base_url = "https://open.bigmodel.cn/api/paas/v4/" # API endpoint URL
+api_key = "YOUR_API_KEY"                           # Your API key
+max_tokens = 8192                                  # Maximum number of tokens in the response
+temperature = 0.0                                  # Controls randomness
+
+[llm.vision] #ZHIPU GLM VISION:
+model = "GLM-4.7-Flash"                            # The vision model to use
+base_url = "https://open.bigmodel.cn/api/paas/v4/" # API endpoint URL for vision model
+api_key = "YOUR_API_KEY"                           # Your API key for vision model
+max_tokens = 8192                                  # Maximum number of tokens in the response
+temperature = 0.0                                  # Controls randomness for vision model
