@@ -13,6 +13,7 @@ from app.tool.ask_human import AskHuman
 from app.tool.mcp import MCPClients, MCPClientTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
+from app.tool.regex_extraction import RegexExtraction
 
 
 _BROWSER_USE_SERVER_ID = "browser_use"
@@ -60,6 +61,7 @@ class Manus(ToolCallAgent):
             StrReplaceEditor(),
             AskHuman(),
             Terminate(),
+            RegexExtraction(),
         )
     )
 

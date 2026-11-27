@@ -39,7 +39,7 @@ class MCPServer:
         tool_function = tool_param["function"]
 
         # 定义要注册到服务器的异步函数
-        async def tool_method(**kwargs):
+        async def tool_method(**kwargs):     # 这是内层函数
             logger.info(f"正在执行工具 {tool_name}: {kwargs}")
             result = await tool.execute(**kwargs)
 

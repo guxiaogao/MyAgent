@@ -2,7 +2,7 @@ from contextlib import AsyncExitStack
 from typing import Dict, List, Optional
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.stdio import stdio_client
 from mcp.types import ImageContent, ListToolsResult, TextContent
 
@@ -66,7 +66,12 @@ class MCPClients(ToolCollection):
         self.server_instructions = {}
 
     async def connect_sse(self, server_url: str, server_id: str = "") -> None:
-        """通过 SSE 传输协议连接 MCP 服务器。"""
+        """通过 Streamable HTTP 传输协议连接 MCP 服务器。
+
+        说明：HTTP+SSE 传输已被 MCP 规范废弃，此处底层改用
+        streamablehttp_client（Streamable HTTP，MCP 2025-03-26 版
+        规范的标准远程传输）。方法名保留 connect_sse 以兼容既有调用点。
+        """
         if not server_url:
             raise ValueError("Server URL is required.")
 
@@ -79,9 +84,12 @@ class MCPClients(ToolCollection):
         exit_stack = AsyncExitStack()
         self.exit_stacks[server_id] = exit_stack
 
-        streams_context = sse_client(url=server_url)
+        # Streamable HTTP 客户端返回 (读流, 写流, 会话ID回调) 三元组；
+        # 会话 ID 由 ClientSession 自行管理，此处无需持有回调
+        streams_context = streamablehttp_client(url=server_url)
         streams = await exit_stack.enter_async_context(streams_context)
-        session = await exit_stack.enter_async_context(ClientSession(*streams))
+        read, write, _ = streams
+        session = await exit_stack.enter_async_context(ClientSession(read, write))
         self.sessions[server_id] = session
 
         await self._initialize_and_list_tools(server_id)

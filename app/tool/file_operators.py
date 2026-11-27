@@ -1,6 +1,7 @@
 """面向本地与沙箱两种环境的文件操作接口及实现。"""
 
 import asyncio
+import locale
 from pathlib import Path
 from typing import Optional, Protocol, Tuple, Union, runtime_checkable
 
@@ -10,6 +11,35 @@ from app.sandbox.client import SANDBOX_CLIENT
 
 
 PathLike = Union[str, Path]
+
+
+def _decode_process_output(data: bytes) -> str:
+    """解码子进程输出，兼容 Windows 控制台的本地编码（如中文系统的 GBK/cp936）。
+
+    依次尝试 UTF-8 与各系统编码，均失败时用 UTF-8 容错解码，
+    保证任何情况下都不会因编码问题抛出 UnicodeDecodeError。
+    注意：Python 处于 UTF-8 模式时 getpreferredencoding() 也返回 utf-8，
+    因此需要 locale.getencoding() 和 mbcs（Windows ANSI 代码页）兜底。
+    """
+    import sys
+
+    candidates = [
+        "utf-8",
+        locale.getpreferredencoding(False),
+        locale.getencoding(),
+    ]
+    if sys.platform == "win32":
+        candidates.append("mbcs")
+    tried = set()
+    for encoding in candidates:
+        if not encoding or encoding in tried:
+            continue
+        tried.add(encoding)
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 @runtime_checkable
@@ -81,8 +111,8 @@ class LocalFileOperator(FileOperator):
             )
             return (
                 process.returncode or 0,
-                stdout.decode(),
-                stderr.decode(),
+                _decode_process_output(stdout),
+                _decode_process_output(stderr),
             )
         except asyncio.TimeoutError as exc:
             try:

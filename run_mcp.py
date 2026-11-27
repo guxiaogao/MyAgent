@@ -78,8 +78,8 @@ def parse_args() -> argparse.Namespace:  # 定义参数解析函数，返回解�
     )
     parser.add_argument(  # 注册服务器地址参数
         "--server-url",  # 参数长名称 --server-url
-        default="http://127.0.0.1:8000/sse",  # 默认指向本机 8000 端口的 SSE 端点
-        help="SSE 连接地址",  # 帮助说明：SSE 连接地址
+        default="http://127.0.0.1:8000/mcp",  # 默认指向本机 8000 端口的 Streamable HTTP 端点
+        help="Streamable HTTP 连接地址",  # 帮助说明：Streamable HTTP 连接地址
     )
     parser.add_argument(  # 注册交互模式开关
         "--interactive", "-i", action="store_true", help="以交互模式运行"  # -i 为布尔开关，传入即进入多轮交互模式

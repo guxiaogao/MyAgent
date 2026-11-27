@@ -109,8 +109,10 @@ class PlanningFlow(BaseFlow):
                     return f"为以下请求创建计划失败：{input_text}"
 
             result = ""
+            # 主循环：反复取出下一个活跃步骤交给智能体执行，
+            # 直到计划全部完成或智能体主动终止流程
             while True:
-                # 获取当前要执行的步骤
+                # 获取当前要执行的步骤（第一个未完成步骤的索引及其信息）
                 self.current_step_index, step_info = await self._get_current_step_info()
 
                 # 没有更多步骤（计划完成）时结束循环
@@ -118,13 +120,15 @@ class PlanningFlow(BaseFlow):
                     result += await self._finalize_plan()
                     break
 
-                # 用合适的智能体执行当前步骤
+                # 用合适的智能体执行当前步骤：
+                # 若步骤文本带有 [TYPE] 标记且与某智能体键名匹配，则路由到对应智能体
                 step_type = step_info.get("type") if step_info else None
                 executor = self.get_executor(step_type)
                 step_result = await self._execute_step(executor, step_info)
                 result += step_result + "\n"
 
-                # 智能体主动终止时结束流程
+                # 智能体主动终止（如任务完成、等待用户输入）时结束整个流程，
+                # 不再继续推进计划中的剩余步骤
                 if hasattr(executor, "state") and executor.state == AgentState.FINISHED:
                     break
 
@@ -138,9 +142,9 @@ class PlanningFlow(BaseFlow):
         logger.info(f"正在创建初始计划，ID: {self.active_plan_id}")
 
         system_message_content = (
-            "You are a planning assistant. Create a concise, actionable plan with clear steps. "
-            "Focus on key milestones rather than detailed sub-steps. "
-            "Optimize for clarity and efficiency."
+            "你是一个规划助手。请创建简洁、可执行的计划，包含清晰的步骤。"
+            "聚焦于关键里程碑，而非过于细化的子步骤。"
+            "追求清晰与高效。"
         )
         agents_description = []
         for key in self.executor_keys:
@@ -154,9 +158,8 @@ class PlanningFlow(BaseFlow):
         if len(agents_description) > 1:
             # 多智能体时附加其描述，便于 LLM 在步骤中指定执行者
             system_message_content += (
-                f"\nNow we have {agents_description} agents. "
-                f"The infomation of them are below: {json.dumps(agents_description)}\n"
-                "When creating steps in the planning tool, please specify the agent names using the format '[agent_name]'."
+                f"\n当前有 {len(agents_description)} 个智能体，信息如下：{json.dumps(agents_description)}\n"
+                "在规划工具中创建步骤时，请使用 '[智能体名]' 的格式在步骤文本中指定负责执行的智能体名称。"
             )
 
         # 创建用于生成计划的系统消息
@@ -164,10 +167,10 @@ class PlanningFlow(BaseFlow):
 
         # 创建包含用户请求的用户消息
         user_message = Message.user_message(
-            f"Create a reasonable plan with clear steps to accomplish the task: {request}"
+            f"请制定一个包含清晰步骤的合理计划，以完成以下任务：{request}"
         )
 
-        # 带规划工具调用 LLM
+        # 带规划工具调用 LLM 生成计划文本，规划工具负责管理LLM返回的规划
         response = await self.llm.ask_tool(
             messages=[user_message],
             system_msgs=[system_message],
@@ -175,11 +178,12 @@ class PlanningFlow(BaseFlow):
             tool_choice=ToolChoice.AUTO,
         )
 
-        # 处理返回的工具调用（如有）
+        # 处理返回的工具调用（如有）：只关注名为 planning 的工具调用
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call.function.name == "planning":
-                    # 解析工具参数
+                    # 解析工具参数：不同模型返回的 arguments 可能是
+                    # JSON 字符串或已解析的字典，需统一转为字典
                     args = tool_call.function.arguments
                     if isinstance(args, str):
                         try:
@@ -188,7 +192,8 @@ class PlanningFlow(BaseFlow):
                             logger.error(f"解析工具参数失败: {args}")
                             continue
 
-                    # 确保使用流程统一的 plan_id，并执行规划工具
+                    # 强制覆盖为流程统一的 plan_id，防止 LLM 自行生成的 plan_id
+                    # 与流程内部状态不一致；随后执行规划工具完成计划创建
                     args["plan_id"] = self.active_plan_id
 
                     # 通过工具集合执行该工具，而非直接调用
@@ -205,8 +210,8 @@ class PlanningFlow(BaseFlow):
             **{
                 "command": "create",
                 "plan_id": self.active_plan_id,
-                "title": f"Plan for: {request[:50]}{'...' if len(request) > 50 else ''}",
-                "steps": ["Analyze request", "Execute task", "Verify results"],
+                "title": f"任务计划：{request[:50]}{'...' if len(request) > 50 else ''}",
+                "steps": ["分析请求", "执行任务", "验证结果"],
             }
         )
 
@@ -228,8 +233,9 @@ class PlanningFlow(BaseFlow):
             steps = plan_data.get("steps", [])
             step_statuses = plan_data.get("step_statuses", [])
 
-            # 查找第一个未完成的步骤
+            # 顺序查找第一个活跃（未开始/进行中）的步骤
             for i, step in enumerate(steps):
+                # step_statuses 可能短于 steps（历史数据不完整），越界时按未开始处理
                 if i >= len(step_statuses):
                     status = PlanStepStatus.NOT_STARTED.value
                 else:
@@ -239,7 +245,8 @@ class PlanningFlow(BaseFlow):
                     # 提取步骤的类型/类别信息（如有）
                     step_info = {"text": step}
 
-                    # 尝试从步骤文本中提取类型标记（如 [SEARCH] 或 [CODE]）
+                    # 尝试从步骤文本中提取类型标记（如 [SEARCH] 或 [CODE]），
+                    # 标记转小写后用于匹配同名智能体键名，实现按步骤类型路由
                     import re
 
                     type_match = re.search(r"\[([A-Z_]+)\]", step)
@@ -256,7 +263,8 @@ class PlanningFlow(BaseFlow):
                         )
                     except Exception as e:
                         logger.warning(f"标记步骤为进行中时出错: {e}")
-                        # 标记失败时直接更新步骤状态兜底
+                        # 标记失败时兜底：绕过工具，直接在存储中写入"进行中"状态；
+                        # 索引已存在则覆盖，否则先补齐前面缺失的状态再追加
                         if i < len(step_statuses):
                             step_statuses[i] = PlanStepStatus.IN_PROGRESS.value
                         else:
@@ -280,27 +288,32 @@ class PlanningFlow(BaseFlow):
         plan_status = await self._get_plan_text()
         step_text = step_info.get("text", f"Step {self.current_step_index}")
 
-        # 构建执行当前步骤的提示词
+        # 构建执行当前步骤的提示词：附带完整计划状态作为上下文，
+        # 并明确限定智能体只执行当前这一步，完成后输出本次完成情况的总结
         step_prompt = f"""
-        CURRENT PLAN STATUS:
+        当前计划状态：
         {plan_status}
 
-        YOUR CURRENT TASK:
-        You are now working on step {self.current_step_index}: "{step_text}"
+        你的当前任务：
+        你正在执行第 {self.current_step_index} 步："{step_text}"
 
-        Please only execute this current step using the appropriate tools. When you're done, provide a summary of what you accomplished.
+        请只使用合适的工具执行当前这一步。完成后，请总结你完成了哪些工作。
         """
 
-        # 通过 agent.run() 执行步骤
+        # 通过 agent.run() 执行步骤（智能体内部可自主进行多轮工具调用，
+        # 是否完成当前步骤由智能体自身的终止机制判断）
         try:
             step_result = await executor.run(step_prompt)
 
-            # 执行成功后将该步骤标记为已完成
+            # 执行成功后将该步骤标记为已完成，供下一轮循环推进到后续步骤
             await self._mark_step_completed()
 
             return step_result
         except Exception as e:
             logger.error(f"执行步骤 {self.current_step_index} 时出错: {e}")
+            # 执行出错时步骤停留在活跃状态，下一轮会被再次取出重试，
+            # 因此这里将其标记为阻塞以避免无限循环
+            await self._mark_step_blocked(f"执行出错：{str(e)}")
             return f"执行步骤 {self.current_step_index} 时出错：{str(e)}"
 
     async def _mark_step_completed(self) -> None:
@@ -326,13 +339,54 @@ class PlanningFlow(BaseFlow):
                 plan_data = self.planning_tool.plans[self.active_plan_id]
                 step_statuses = plan_data.get("step_statuses", [])
 
-                # 确保 step_statuses 列表足够长
+                # 确保 step_statuses 列表足够长（不足时补齐"未开始"状态）
                 while len(step_statuses) <= self.current_step_index:
                     step_statuses.append(PlanStepStatus.NOT_STARTED.value)
 
                 # 更新状态
                 step_statuses[self.current_step_index] = PlanStepStatus.COMPLETED.value
                 plan_data["step_statuses"] = step_statuses
+
+    async def _mark_step_blocked(self, note: str = "") -> None:
+        """执行步骤抛出异常时，将当前步骤标记为阻塞并记录原因备注。
+
+        阻塞状态不属于活跃状态，可避免流程下一轮重复执行同一步骤造成死循环。
+        """
+        if self.current_step_index is None:
+            return
+
+        try:
+            # 通过规划工具标记阻塞并写入备注
+            await self.planning_tool.execute(
+                command="mark_step",
+                plan_id=self.active_plan_id,
+                step_index=self.current_step_index,
+                step_status=PlanStepStatus.BLOCKED.value,
+                step_notes=note,
+            )
+            logger.info(
+                f"已将计划 {self.active_plan_id} 中的步骤 {self.current_step_index} 标记为阻塞"
+            )
+        except Exception as e:
+            logger.warning(f"标记步骤为阻塞失败: {e}")
+            # 标记失败时直接在规划工具存储中更新状态与备注
+            if self.active_plan_id in self.planning_tool.plans:
+                plan_data = self.planning_tool.plans[self.active_plan_id]
+                step_statuses = plan_data.get("step_statuses", [])
+                step_notes = plan_data.get("step_notes", [])
+
+                # 确保 step_statuses 与 step_notes 列表足够长
+                while len(step_statuses) <= self.current_step_index:
+                    step_statuses.append(PlanStepStatus.NOT_STARTED.value)
+                while len(step_notes) <= self.current_step_index:
+                    step_notes.append("")
+
+                # 更新状态与备注
+                step_statuses[self.current_step_index] = PlanStepStatus.BLOCKED.value
+                if note:
+                    step_notes[self.current_step_index] = note
+                plan_data["step_statuses"] = step_statuses
+                plan_data["step_notes"] = step_notes
 
     async def _get_plan_text(self) -> str:
         """获取当前计划的格式化文本。"""
@@ -363,10 +417,11 @@ class PlanningFlow(BaseFlow):
             while len(step_notes) < len(steps):
                 step_notes.append("")
 
-            # 按状态统计步骤数
+            # 按各状态统计步骤数，用于计算整体完成进度百分比
             status_counts = {status: 0 for status in PlanStepStatus.get_all_statuses()}
 
             for status in step_statuses:
+                # 忽略未知的状态值，避免统计时出错
                 if status in status_counts:
                     status_counts[status] += 1
 
@@ -407,7 +462,7 @@ class PlanningFlow(BaseFlow):
         """完成计划并直接使用流程的 LLM 生成总结。"""
         plan_text = await self._get_plan_text()
 
-        # 直接使用流程的 LLM 生成总结
+        # 直接使用流程的 LLM 生成总结（不占用执行智能体的上下文与可用轮次）
         try:
             system_message = Message.system_message(
                 "你是一个规划助手，任务是总结已完成的计划。"
@@ -429,11 +484,11 @@ class PlanningFlow(BaseFlow):
             try:
                 agent = self.primary_agent
                 summary_prompt = f"""
-                The plan has been completed. Here is the final plan status:
+                计划已全部完成。以下是最终计划状态：
 
                 {plan_text}
 
-                Please provide a summary of what was accomplished and any final thoughts.
+                请总结已完成的成果以及最终的想法。
                 """
                 summary = await agent.run(summary_prompt)
                 return f"Plan completed:\n\n{summary}"

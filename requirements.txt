@@ -29,7 +29,7 @@ docker~=7.1.0
 pytest~=8.3.5
 pytest-asyncio~=0.25.3
 
-mcp~=1.5.0
+mcp~=1.30.0
 httpx>=0.27.0
 tomli>=2.0.0
 
@@ -41,3 +41,11 @@ crawl4ai~=0.6.3
 
 huggingface-hub~=0.29.2
 setuptools~=75.8.0
+
+# --- 版本兼容性约束（2026-11 固化） ---
+# torch>=2.13 要求 setuptools>=77，与上面的 setuptools~=75.8.0 冲突
+torch~=2.12.0
+# transformers>=4.51 要求 huggingface-hub>=0.30，与上面的 huggingface-hub~=0.29.2 冲突
+transformers~=4.49.0
+# litellm>=1.67 要求 openai>=1.68.2，与上面的 openai~=1.66.3 冲突（crawl4ai 的传递依赖，显式声明以约束解析）
+litellm~=1.65.0

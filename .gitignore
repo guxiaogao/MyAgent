@@ -1,4 +1,7 @@
 ### Project-specific ###
+# Local configuration with API keys - never upload
+config/config.toml
+
 # Logs
 logs/
 
@@ -200,3 +203,6 @@ cython_debug/
 
 # node
 node_modules
+
+# trae
+.trae/

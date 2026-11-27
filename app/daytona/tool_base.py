@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Dict, Optional
 
 from daytona import Daytona, DaytonaConfig, Sandbox, SandboxState
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from app.config import config
 from app.daytona.sandbox import create_sandbox, start_supervisord_session
@@ -64,9 +64,8 @@ class SandboxToolsBase(BaseTool):
     workspace_path: str = Field(default="/workspace", exclude=True)
     _sessions: dict[str, str] = {}
 
-    class Config:
-        arbitrary_types_allowed = True  # 允许 ThreadManager 等非 pydantic 类型
-        underscore_attrs_are_private = True
+    # pydantic v2：下划线属性默认即私有属性，无需 underscore_attrs_are_private
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     async def _ensure_sandbox(self) -> Sandbox:
         """确保存在可用的沙箱实例，必要时按项目创建或唤醒。"""

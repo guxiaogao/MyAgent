@@ -218,19 +218,29 @@ class StrReplaceEditor(BaseTool):
 
     @staticmethod
     async def _view_directory(path: PathLike, operator: FileOperator) -> CLIResult:
-        """展示目录内容。"""
-        find_cmd = f"find {path} -maxdepth 2 -not -path '*/\\.*'"
+        """展示目录内容（纯 Python 实现，跨平台，不依赖 shell 命令）。"""
+        import os
 
-        # 通过文件操作器执行 find 命令
-        returncode, stdout, stderr = await operator.run_command(find_cmd)
-
-        if not stderr:
+        root = str(path)
+        lines = [root]
+        try:
+            # os.walk 自上而下遍历，用 depth 控制只列出最深 2 层，跳过隐藏条目
+            for current, dirs, files in os.walk(root):
+                depth = current[len(root):].count(os.sep)
+                if depth >= 2:
+                    dirs[:] = []  # 已达深度上限，不再下钻
+                    continue
+                # 原地过滤隐藏目录/文件，隐藏条目不进入遍历也不输出
+                dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+                for name in dirs + sorted(f for f in files if not f.startswith(".")):
+                    lines.append(os.path.join(current, name))
             stdout = (
                 f"Here's the files and directories up to 2 levels deep in {path}, "
-                f"excluding hidden items:\n{stdout}\n"
+                f"excluding hidden items:\n" + "\n".join(lines) + "\n"
             )
-
-        return CLIResult(output=stdout, error=stderr)
+            return CLIResult(output=stdout)
+        except OSError as e:
+            return CLIResult(error=f"无法列出目录 {path}：{e}")
 
     async def _view_file(
         self,
